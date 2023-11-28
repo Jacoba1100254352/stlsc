@@ -8,7 +8,7 @@ from message import Message, MessageType
 # Default connection parameters
 DEFAULT_PORT = 8087
 DEFAULT_HOST = 'localhost'
-
+TIMEOUT_SECONDS = 10  # Timeout for socket operations
 
 # Parse command line arguments
 def parse_arguments():
@@ -19,22 +19,32 @@ def parse_arguments():
     parser.add_argument('-v', '--verbose', action='store_true', help='Turn on debugging output.')
     return parser.parse_args()
 
+# Print debug message if verbose mode is on
+def debug_print(verbose, message):
+    if verbose:
+        print(message)
 
 # Main program
 def main():
     args = parse_arguments()
 
-    # Establish connection
+    # Establish connection with timeout
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(TIMEOUT_SECONDS)
+        debug_print(args.verbose, f"Connecting to {args.host}:{args.port}")
         s.connect((args.host, args.port))
 
         # Send Hello message
+        debug_print(args.verbose, "Sending Hello message")
         s.send(Message(MessageType.HELLO).to_bytes())
 
         # Receive and verify certificate
+        debug_print(args.verbose, "Waiting for Certificate message")
         server_cert_msg = Message.from_socket(s)
+        if server_cert_msg is None:
+            raise Exception("No data received from server, or connection closed unexpectedly")
         if server_cert_msg.type != MessageType.CERTIFICATE:
-            raise Exception("Expected a certificate message")
+            raise Exception("Expected a certificate message, received something else")
         server_nonce, server_cert = server_cert_msg.data[:32], server_cert_msg.data[32:]
         server_cert_obj = utils.load_certificate(server_cert)
         if not server_cert_obj:
@@ -43,15 +53,17 @@ def main():
         # Send encrypted nonce
         client_nonce = os.urandom(32)
         encrypted_nonce = utils.encrypt_with_public_key(client_nonce, server_cert_obj.public_key())
+        debug_print(args.verbose, "Sending encrypted nonce")
         s.send(Message(MessageType.NONCE, encrypted_nonce).to_bytes())
 
         # Generate keys
         server_enc_key, server_mac_key, client_enc_key, client_mac_key = utils.generate_keys(client_nonce, server_nonce)
 
         # Receive server hash and validate
+        debug_print(args.verbose, "Waiting for Server Hash message")
         server_hash_msg = Message.from_socket(s)
-        if server_hash_msg.type != MessageType.HASH:
-            raise Exception("Expected a hash message")
+        if server_hash_msg is None or server_hash_msg.type != MessageType.HASH:
+            raise Exception("Expected a hash message, received something else or no message")
         expected_server_hash = utils.mac(b''.join([Message(MessageType.HELLO).to_bytes(),
                                                    server_cert_msg.to_bytes(),
                                                    Message(MessageType.NONCE, encrypted_nonce).to_bytes()]),
@@ -64,16 +76,17 @@ def main():
                                           server_cert_msg.to_bytes(),
                                           Message(MessageType.NONCE, encrypted_nonce).to_bytes()]),
                                 client_mac_key)
+        debug_print(args.verbose, "Sending Client Hash message")
         s.send(Message(MessageType.HASH, client_hash).to_bytes())
 
         # Receive and process data
+        debug_print(args.verbose, "Receiving data messages")
         received_data = b''
         sequence_number = 0
         while True:
             data_msg = Message.from_socket(s)
             if data_msg is None:
                 raise Exception("No data received from server, or connection closed unexpectedly")
-
             if data_msg.type != MessageType.DATA:
                 break  # Assuming the non-data message signifies the end of data transmission
 
@@ -93,7 +106,7 @@ def main():
         else:
             with open(args.file, 'wb') as file:
                 file.write(received_data)
-
+        debug_print(args.verbose, "Data received and saved")
 
 if __name__ == "__main__":
     main()
