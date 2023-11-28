@@ -1,7 +1,7 @@
+import secrets
 import socket
 import argparse
 import sys
-import os
 import crypto_utils as utils
 from message import Message, MessageType
 import logging
@@ -9,11 +9,13 @@ import logging
 # Global client socket
 client = None
 
+
 def connect(host, port):
     global client
     client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client.connect((host, port))
     logging.info("Connected to server.")
+
 
 def send_hello():
     hello_mes = Message(MessageType.HELLO).to_bytes()
@@ -23,6 +25,7 @@ def send_hello():
     logging.info("Nonce & Certificate received.")
     return response
 
+
 def main(host, port, filename, verbose):
     if verbose:
         logging.basicConfig(level=logging.INFO)
@@ -30,20 +33,31 @@ def main(host, port, filename, verbose):
     connect(host, port)
     response = send_hello()
 
+    # Splitting nonce and certificate from the response
     server_nonce = response[:32]
     server_cert = response[32:]
     server_cert_obj = utils.load_certificate(server_cert)
 
-    client_nonce = os.urandom(32)
+    client_nonce = secrets.token_bytes(32)  # Using secrets for nonce generation
     encrypted_nonce = utils.encrypt_with_public_key(client_nonce, server_cert_obj.public_key())
     client.sendall(Message(MessageType.NONCE, encrypted_nonce).to_bytes())
     logging.info("Encrypted nonce sent.")
 
     server_enc_key, server_mac_key, client_enc_key, client_mac_key = utils.generate_keys(client_nonce, server_nonce)
 
+    # Receive server hash message
     server_hash_msg = Message.from_socket(client)
-    expected_server_hash = utils.mac(b''.join([Message(MessageType.HELLO).to_bytes(), response]),
-                                     server_mac_key)
+
+    # Forming cumulative data as in the working script
+    client_hello_message = Message(MessageType.HELLO).to_bytes()
+    server_certificate_message = Message(MessageType.CERTIFICATE, response).to_bytes()
+    client_nonce_message = Message(MessageType.NONCE, encrypted_nonce).to_bytes()
+    cumulated_data = client_hello_message + server_certificate_message + client_nonce_message
+
+    expected_server_hash = utils.mac(cumulated_data, server_mac_key)
+    logging.info(f"Server Hash (Received): {server_hash_msg.data}")
+    logging.info(f"Server Hash (Expected): {expected_server_hash}")
+
     if server_hash_msg.data != expected_server_hash:
         logging.error("Invalid server hash.")
         sys.exit(1)
@@ -81,6 +95,7 @@ def main(host, port, filename, verbose):
             file.write(received_data)
     logging.info("Data received and saved")
 
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Simple TLS Client')
     parser.add_argument('file', help='The file name to save to. Use - for stdout.')
@@ -88,6 +103,7 @@ def parse_arguments():
     parser.add_argument('--host', default='localhost', help='Hostname to connect to.')
     parser.add_argument('-v', '--verbose', action='store_true', help='Turn on debugging output.')
     return parser.parse_args()
+
 
 if __name__ == "__main__":
     args = parse_arguments()
